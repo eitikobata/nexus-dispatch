@@ -26,7 +26,11 @@ export class ResetService implements OnModuleInit {
   ) {}
 
   onModuleInit() {
-    // Runs hourly by default; adjust via RESET_INTERVAL_MS if needed.
+    // Seed immediately on cold start — otherwise the roster (and the
+    // Skills the generator depends on) stay empty until the first
+    // scheduled interval fires, which defaults to a full hour.
+    this.reset().catch((e) => this.logger.error(e));
+
     const intervalMs = Number(this.config.get('RESET_INTERVAL_MS') ?? 60 * 60 * 1000);
     setInterval(() => this.reset().catch((e) => this.logger.error(e)), intervalMs);
   }

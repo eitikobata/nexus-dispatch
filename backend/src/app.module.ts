@@ -23,9 +23,9 @@ import { ResetModule } from './reset/reset.module';
     MetricsModule,
     OperativesModule,
     DirectivesModule,
+    ResetModule,
     SimulatorModule,
     SlaModule,
-    ResetModule,
   ],
 })
 export class AppModule {}
