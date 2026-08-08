@@ -11,6 +11,11 @@ export class OperativesController {
     return this.operatives.findAll();
   }
 
+  @Get(':id')
+  findOne(@Param('id') id: string) {
+    return this.operatives.findOne(id);
+  }
+
   // Handler override — mark an operative off-duty/available by hand,
   // independent of the simulated lifecycle.
   @Patch(':id/status')

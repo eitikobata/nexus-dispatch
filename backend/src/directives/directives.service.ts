@@ -1,4 +1,4 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { ConflictException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { AssignmentOutcome, DirectiveStatus, OperativeStatus, Priority } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
@@ -109,32 +109,64 @@ export class DirectivesService {
   }
 
   // Handler override: skip matching entirely, assign to a named operative.
+  // Runs the check-then-act sequence inside a transaction with the same
+  // updateMany-as-optimistic-lock trick as tryAssign, so a manual reassign
+  // racing against the automatic RabbitMQ consumer can't double-book either
+  // the Directive or the Operative — whichever commits first wins, the
+  // other gets a clear 409 instead of a corrupted state.
   async manualReassign(directiveId: string, operativeId: string) {
-    const [directive, operative] = await Promise.all([
-      this.prisma.directive.findUniqueOrThrow({ where: { id: directiveId } }),
-      this.prisma.operative.findUniqueOrThrow({ where: { id: operativeId } }),
-    ]);
-    if (operative.status !== OperativeStatus.AVAILABLE) {
-      throw new Error('Operative is not available');
-    }
+    const directive = await this.prisma.directive.findUnique({ where: { id: directiveId } });
+    if (!directive) throw new NotFoundException(`Directive ${directiveId} not found`);
 
-    await this.prisma.operative.update({ where: { id: operativeId }, data: { status: OperativeStatus.ASSIGNED } });
-    const assignment = await this.prisma.assignment.create({ data: { directiveId, operativeId } });
-    const now = new Date();
-    await this.prisma.directive.update({
-      where: { id: directiveId },
-      data: { status: DirectiveStatus.ASSIGNED, assignedAt: now },
+    const operative = await this.prisma.operative.findUnique({ where: { id: operativeId } });
+    if (!operative) throw new NotFoundException(`Operative ${operativeId} not found`);
+
+    const result = await this.prisma.$transaction(async (tx) => {
+      const directiveLock = await tx.directive.updateMany({
+        where: { id: directiveId, status: DirectiveStatus.QUEUED },
+        data: {},
+      });
+      if (directiveLock.count === 0) {
+        // Read the reason inside the same transaction, at the instant it's
+        // actually true — reading it afterward, outside the transaction,
+        // would report whatever the state happens to be by then, which can
+        // already be different (and misleadingly say e.g. "AVAILABLE" for
+        // an operative that was busy a moment ago and is free again now).
+        const current = await tx.directive.findUnique({ where: { id: directiveId } });
+        return { failReason: `Directive ${directiveId} is already ${current?.status}, not QUEUED — it was likely routed automatically before this reassign landed` };
+      }
+
+      const operativeLock = await tx.operative.updateMany({
+        where: { id: operativeId, status: OperativeStatus.AVAILABLE },
+        data: { status: OperativeStatus.ASSIGNED },
+      });
+      if (operativeLock.count === 0) {
+        const current = await tx.operative.findUnique({ where: { id: operativeId } });
+        return { failReason: `Operative ${operativeId} is ${current?.status}, not AVAILABLE` };
+      }
+
+      const assignment = await tx.assignment.create({ data: { directiveId, operativeId } });
+      const now = new Date();
+      await tx.directive.update({
+        where: { id: directiveId },
+        data: { status: DirectiveStatus.ASSIGNED, assignedAt: now },
+      });
+      return { assignment, now };
     });
 
-    const waitSeconds = (now.getTime() - directive.queuedAt.getTime()) / 1000;
+    if ('failReason' in result) {
+      throw new ConflictException(result.failReason);
+    }
+
+    const waitSeconds = (result.now.getTime() - directive.queuedAt.getTime()) / 1000;
     this.events.emit('directive.assigned', {
       directiveId,
       operativeId,
-      assignmentId: assignment.id,
+      assignmentId: result.assignment.id,
       waitSeconds,
       manual: true,
     });
-    return assignment;
+    return result.assignment;
   }
 
   async confirmAcceptance(assignmentId: string) {
@@ -202,10 +234,11 @@ export class DirectivesService {
   // Handler override: bump priority one level manually (independent of
   // the automatic SLA escalation in SlaService).
   async escalate(directiveId: string) {
-    const directive = await this.prisma.directive.findUniqueOrThrow({
+    const directive = await this.prisma.directive.findUnique({
       where: { id: directiveId },
       include: { requiredSkill: true },
     });
+    if (!directive) throw new NotFoundException(`Directive ${directiveId} not found`);
     const idx = PRIORITY_ORDER.indexOf(directive.priority);
     const next = PRIORITY_ORDER[Math.min(idx + 1, PRIORITY_ORDER.length - 1)];
     const updated = await this.prisma.directive.update({

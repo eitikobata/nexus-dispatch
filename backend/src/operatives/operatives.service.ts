@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, NotFoundException } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { OperativeStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
@@ -18,6 +18,15 @@ export class OperativesService {
     });
   }
 
+  async findOne(id: string) {
+    const operative = await this.prisma.operative.findUnique({
+      where: { id },
+      include: { skills: true, assignments: { include: { directive: true } } },
+    });
+    if (!operative) throw new NotFoundException(`Operative ${id} not found`);
+    return operative;
+  }
+
   // Picks one AVAILABLE operative with the given skill. Not transactional
   // by itself — the caller (DirectivesService.tryAssign) wraps the whole
   // match-and-assign sequence in a single Prisma transaction so two
@@ -29,6 +38,9 @@ export class OperativesService {
   }
 
   async setStatus(operativeId: string, status: OperativeStatus, manual = false) {
+    const exists = await this.prisma.operative.findUnique({ where: { id: operativeId } });
+    if (!exists) throw new NotFoundException(`Operative ${operativeId} not found`);
+
     const operative = await this.prisma.operative.update({
       where: { id: operativeId },
       data: { status },
