@@ -1,0 +1,115 @@
+// Nexus — Dispatch Engine
+// Prisma schema: Directive (mission), Operative (agent), Assignment, SlaEvent
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Priority {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum DirectiveStatus {
+  QUEUED       // created, waiting for an available Operative with matching skill
+  ASSIGNED     // routed to an Operative, awaiting acceptance
+  IN_PROGRESS  // Operative accepted, actively working
+  COMPLETED    // finished successfully
+  FAILED       // Operative aborted / lost contact mid-mission
+}
+
+enum OperativeStatus {
+  AVAILABLE
+  ASSIGNED    // has a Directive routed, not yet accepted
+  BUSY        // actively working a Directive
+  OFF_DUTY
+}
+
+enum AssignmentOutcome {
+  SUCCESS
+  FAILED
+  ABORTED
+}
+
+model Skill {
+  id         String      @id @default(cuid())
+  name       String      @unique // e.g. "recon", "sabotage", "extraction"
+  operatives Operative[] @relation("OperativeSkills")
+  directives Directive[] @relation("DirectiveRequiredSkill")
+}
+
+model Operative {
+  id          String            @id @default(cuid())
+  codename    String            @unique
+  status      OperativeStatus   @default(AVAILABLE)
+  skills      Skill[]           @relation("OperativeSkills")
+  assignments Assignment[]
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+
+  @@index([status])
+}
+
+model Directive {
+  id                 String            @id @default(cuid())
+  title               String
+  category             String            // e.g. "recon", "sabotage", "extraction" — mirrors skill name
+  requiredSkill        Skill             @relation("DirectiveRequiredSkill", fields: [requiredSkillId], references: [id])
+  requiredSkillId       String
+  priority              Priority          @default(MEDIUM)
+  status                DirectiveStatus   @default(QUEUED)
+  estimatedDurationSec   Int               // fake-duration the simulated Operative will take once accepted
+
+  queuedAt              DateTime          @default(now())
+  assignedAt            DateTime?
+  completedAt           DateTime?
+
+  assignments            Assignment[]
+  slaEvents              SlaEvent[]
+
+  createdAt              DateTime          @default(now())
+  updatedAt               DateTime          @updatedAt
+
+  @@index([status, priority])
+  @@index([requiredSkillId])
+}
+
+// One row per routing attempt. A Directive can have more than one Assignment
+// if a prior Operative aborted and it had to be re-routed — this is what
+// keeps the "who actually worked this, and how many tries did it take" trail visible.
+model Assignment {
+  id            String              @id @default(cuid())
+  directive     Directive           @relation(fields: [directiveId], references: [id])
+  directiveId   String
+  operative     Operative           @relation(fields: [operativeId], references: [id])
+  operativeId   String
+
+  assignedAt    DateTime            @default(now())
+  acceptedAt    DateTime?           // set after the simulated "confirming receipt" delay
+  finishedAt    DateTime?
+  outcome       AssignmentOutcome?  // null while still in progress
+
+  @@index([directiveId])
+  @@index([operativeId])
+}
+
+// One row per SLA breach on a Directive stuck in QUEUED past the wait-time threshold.
+// Prometheus reads breach counts from here (or a metrics endpoint backed by this table).
+model SlaEvent {
+  id               String    @id @default(cuid())
+  directive        Directive @relation(fields: [directiveId], references: [id])
+  directiveId      String
+  breachedAt       DateTime  @default(now())
+  waitTimeSeconds  Int
+  priorityBefore   Priority
+  priorityAfter    Priority  // escalated priority after breach
+
+  @@index([directiveId])
+}
