@@ -57,6 +57,13 @@ export class MetricsService {
     registers: [this.registry],
   });
 
+  private readonly directivesQueued = new client.Gauge({
+    name: 'nexus_directives_queued',
+    help: 'Current count of QUEUED directives, by priority',
+    labelNames: ['priority'],
+    registers: [this.registry],
+  });
+
   constructor() {
     client.collectDefaultMetrics({ register: this.registry });
   }
@@ -90,5 +97,12 @@ export class MetricsService {
   onGauge(payload: { available: number; busy: number }) {
     this.operativesAvailable.set(payload.available);
     this.operativesBusy.set(payload.busy);
+  }
+
+  @OnEvent('directives.queue.gauge')
+  onQueueGauge(payload: { priority: string; count: number }[]) {
+    for (const row of payload) {
+      this.directivesQueued.set({ priority: row.priority }, row.count);
+    }
   }
 }

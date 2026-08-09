@@ -30,6 +30,8 @@ export class SlaService {
 
   @Cron(CronExpression.EVERY_10_SECONDS)
   async sweep() {
+    await this.publishQueueDepth();
+
     const thresholdSec = Number(this.config.get('SLA_BREACH_THRESHOLD_SEC') ?? 120);
     const cutoff = new Date(Date.now() - thresholdSec * 1000);
 
@@ -69,5 +71,20 @@ export class SlaService {
       });
       this.logger.warn(`SLA breach: directive ${directive.id} waited ${waitTimeSeconds}s, escalated to ${nextPriority}`);
     }
+  }
+
+  // All four priorities are always emitted, even at 0 — otherwise a
+  // priority that just emptied out would keep showing its last non-zero
+  // value forever on the Grafana panel (Prometheus gauges hold their last
+  // set value until set again).
+  private async publishQueueDepth() {
+    const counts = await this.prisma.directive.groupBy({
+      by: ['priority'],
+      where: { status: DirectiveStatus.QUEUED },
+      _count: true,
+    });
+    const byPriority = new Map(counts.map((c) => [c.priority, c._count]));
+    const payload = PRIORITY_ORDER.map((priority) => ({ priority, count: byPriority.get(priority) ?? 0 }));
+    this.events.emit('directives.queue.gauge', payload);
   }
 }
