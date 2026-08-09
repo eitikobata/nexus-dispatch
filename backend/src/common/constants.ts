@@ -29,3 +29,9 @@ export const RABBITMQ_MAX_PRIORITY = 10;
 // How long a message waits in the per-skill retry queue before it's
 // dead-lettered back onto the main skill queue for another attempt.
 export const RETRY_DELAY_MS = 5000;
+
+// Limited retry + backoff for messages whose HANDLER THREW (a real bug —
+// e.g. a DB error), as opposed to the "no operative available yet" business
+// case, which retries forever at a fixed interval by design. Exhausting
+// this list sends the message to the DLQ instead of retrying forever.
+export const FAILURE_RETRY_BACKOFF_MS = [5000, 15000, 45000];
