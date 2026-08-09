@@ -1,0 +1,132 @@
+{
+  "title": "Nexus — Dispatch Engine",
+  "uid": "nexus-dispatch",
+  "timezone": "browser",
+  "refresh": "10s",
+  "time": { "from": "now-1h", "to": "now" },
+  "style": "dark",
+  "panels": [
+    {
+      "id": 1,
+      "type": "text",
+      "title": "",
+      "gridPos": { "h": 3, "w": 24, "x": 0, "y": 0 },
+      "options": {
+        "mode": "markdown",
+        "content": "## Nexus — Dispatch Engine\nLive dispatch pipeline: directives routed to operatives by skill and priority, via RabbitMQ."
+      }
+    },
+    {
+      "id": 2,
+      "type": "bargauge",
+      "title": "Queued directives by priority",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 3 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "nexus_directives_queued",
+          "legendFormat": "{{priority}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "#2dd4bf", "value": null },
+              { "color": "#facc15", "value": 5 },
+              { "color": "#fb7185", "value": 10 }
+            ]
+          }
+        }
+      },
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "showUnfilled": true
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Operative utilization",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 3 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        { "expr": "nexus_operatives_available", "legendFormat": "Available", "refId": "A" },
+        { "expr": "nexus_operatives_busy", "legendFormat": "Busy", "refId": "B" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": { "mode": "palette-classic" }
+        }
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value_and_name",
+        "justifyMode": "center"
+      }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Directive wait time (p50 / p90 / p99)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 11 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(nexus_directive_wait_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.90, sum(rate(nexus_directive_wait_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p90",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(nexus_directive_wait_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p99",
+          "refId": "C"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "color": { "mode": "palette-classic" },
+          "custom": { "lineWidth": 2, "fillOpacity": 10 }
+        }
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "SLA breaches over time",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 11 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "increase(nexus_sla_breaches_total[5m])",
+          "legendFormat": "Breaches (5m window)",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": { "fixedColor": "#fb7185", "mode": "fixed" },
+          "custom": { "drawStyle": "bars", "fillOpacity": 60 }
+        }
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } }
+    }
+  ],
+  "schemaVersion": 39,
+  "version": 1
+}

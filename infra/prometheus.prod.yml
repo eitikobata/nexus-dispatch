@@ -1,0 +1,22 @@
+# Shared Prometheus config — lives on the VPS, not inside any single
+# project's repo, since it scrapes multiple projects over time.
+#
+# To onboard a new project later: copy the nexus-backend block below,
+# rename the job, and point it at that project's internal host:port.
+# Nothing else in this file needs to change.
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: nexus-backend
+    static_configs:
+      - targets: ["backends_nexus-dispatch-backend:3000"]
+    metrics_path: /metrics
+
+  # Next project's scrape job goes here, e.g.:
+  # - job_name: administratum-backend
+  #   static_configs:
+  #     - targets: ["backends_administratum-backend:3000"]
+  #   metrics_path: /metrics

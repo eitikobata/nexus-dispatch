@@ -5,6 +5,7 @@ import { Cron, CronExpression } from '@nestjs/schedule';
 import { DirectiveStatus, Priority } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { RabbitmqService } from '../rabbitmq/rabbitmq.service';
+import { OperativesService } from '../operatives/operatives.service';
 import { SkillName } from '../common/constants';
 
 const PRIORITY_ORDER: Priority[] = [Priority.LOW, Priority.MEDIUM, Priority.HIGH, Priority.CRITICAL];
@@ -24,6 +25,7 @@ export class SlaService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly rabbitmq: RabbitmqService,
+    private readonly operatives: OperativesService,
     private readonly events: EventEmitter2,
     private readonly config: ConfigService,
   ) {}
@@ -31,6 +33,11 @@ export class SlaService {
   @Cron(CronExpression.EVERY_10_SECONDS)
   async sweep() {
     await this.publishQueueDepth();
+    // Recomputed here on a fixed tick, instead of chasing every place an
+    // operative's status can change (auto-routing, manual override, self-heal
+    // reset) — this way the gauge is always right within 10s regardless of
+    // which path caused the change.
+    await this.operatives.publishGauge();
 
     const thresholdSec = Number(this.config.get('SLA_BREACH_THRESHOLD_SEC') ?? 120);
     const cutoff = new Date(Date.now() - thresholdSec * 1000);
@@ -41,9 +48,6 @@ export class SlaService {
     });
 
     for (const directive of stuck) {
-      // Already flagged for this stretch of waiting — don't spam SlaEvents
-      // every 10s, only once until it either gets assigned or waits another
-      // full threshold window past the last breach.
       const lastBreach = directive.slaEvents.at(-1);
       if (lastBreach && lastBreach.breachedAt > cutoff) continue;
 
@@ -73,10 +77,6 @@ export class SlaService {
     }
   }
 
-  // All four priorities are always emitted, even at 0 — otherwise a
-  // priority that just emptied out would keep showing its last non-zero
-  // value forever on the Grafana panel (Prometheus gauges hold their last
-  // set value until set again).
   private async publishQueueDepth() {
     const counts = await this.prisma.directive.groupBy({
       by: ['priority'],
