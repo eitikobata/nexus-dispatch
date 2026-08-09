@@ -48,6 +48,9 @@ export class SlaService {
     });
 
     for (const directive of stuck) {
+      // Already flagged for this stretch of waiting — don't spam SlaEvents
+      // every 10s, only once until it either gets assigned or waits another
+      // full threshold window past the last breach.
       const lastBreach = directive.slaEvents.at(-1);
       if (lastBreach && lastBreach.breachedAt > cutoff) continue;
 
@@ -77,6 +80,10 @@ export class SlaService {
     }
   }
 
+  // All four priorities are always emitted, even at 0 — otherwise a
+  // priority that just emptied out would keep showing its last non-zero
+  // value forever on the Grafana panel (Prometheus gauges hold their last
+  // set value until set again).
   private async publishQueueDepth() {
     const counts = await this.prisma.directive.groupBy({
       by: ['priority'],
