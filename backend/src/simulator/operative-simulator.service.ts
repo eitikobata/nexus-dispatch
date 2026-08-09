@@ -35,11 +35,13 @@ export class OperativeSimulatorService {
   }
 
   private async accept(payload: DirectiveAssignedPayload) {
-    await this.directives.confirmAcceptance(payload.assignmentId);
+    const assignment = await this.directives.confirmAcceptance(payload.assignmentId);
+    if (!assignment) return; // wiped by a reset in the meantime — nothing to continue
 
-    const directive = await this.prisma.directive.findUniqueOrThrow({ where: { id: payload.directiveId } });
+    const directive = await this.prisma.directive.findUnique({ where: { id: payload.directiveId } });
+    if (!directive) return; // same race, different table
+
     const runMs = directive.estimatedDurationSec * 1000;
-
     setTimeout(() => this.resolve(payload).catch((e) => this.logger.error(e)), runMs);
   }
 

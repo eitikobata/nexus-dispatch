@@ -1,6 +1,7 @@
 import { ConflictException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { AssignmentOutcome, DirectiveStatus, OperativeStatus, Priority } from '@prisma/client';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { RabbitmqService } from '../rabbitmq/rabbitmq.service';
 import { DIRECTIVE_CATEGORIES, SKILLS, SkillName } from '../common/constants';
@@ -169,17 +170,32 @@ export class DirectivesService {
     return result.assignment;
   }
 
+  private isRecordNotFound(err: unknown): boolean {
+    return err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2025';
+  }
+
   async confirmAcceptance(assignmentId: string) {
-    const assignment = await this.prisma.assignment.update({
-      where: { id: assignmentId },
-      data: { acceptedAt: new Date() },
-      include: { directive: true, operative: true },
-    });
-    await this.prisma.directive.update({
+    let assignment;
+    try {
+      assignment = await this.prisma.assignment.update({
+        where: { id: assignmentId },
+        data: { acceptedAt: new Date() },
+        include: { directive: true, operative: true },
+      });
+    } catch (err) {
+      if (this.isRecordNotFound(err)) {
+        // The self-heal reset wiped this assignment out from under an
+        // in-flight simulated timer — expected during a reset, not a bug.
+        this.logger.debug(`confirmAcceptance: assignment ${assignmentId} no longer exists (likely a reset), skipping`);
+        return null;
+      }
+      throw err;
+    }
+    await this.prisma.directive.updateMany({
       where: { id: assignment.directiveId },
       data: { status: DirectiveStatus.IN_PROGRESS },
     });
-    await this.prisma.operative.update({
+    await this.prisma.operative.updateMany({
       where: { id: assignment.operativeId },
       data: { status: OperativeStatus.BUSY },
     });
@@ -187,18 +203,27 @@ export class DirectivesService {
   }
 
   async finish(assignmentId: string, outcome: AssignmentOutcome) {
-    const assignment = await this.prisma.assignment.update({
-      where: { id: assignmentId },
-      data: { finishedAt: new Date(), outcome },
-      include: { directive: { include: { requiredSkill: true } } },
-    });
+    let assignment;
+    try {
+      assignment = await this.prisma.assignment.update({
+        where: { id: assignmentId },
+        data: { finishedAt: new Date(), outcome },
+        include: { directive: { include: { requiredSkill: true } } },
+      });
+    } catch (err) {
+      if (this.isRecordNotFound(err)) {
+        this.logger.debug(`finish: assignment ${assignmentId} no longer exists (likely a reset), skipping`);
+        return;
+      }
+      throw err;
+    }
 
     if (outcome === AssignmentOutcome.SUCCESS) {
-      await this.prisma.directive.update({
+      await this.prisma.directive.updateMany({
         where: { id: assignment.directiveId },
         data: { status: DirectiveStatus.COMPLETED, completedAt: new Date() },
       });
-      await this.prisma.operative.update({
+      await this.prisma.operative.updateMany({
         where: { id: assignment.operativeId },
         data: { status: OperativeStatus.AVAILABLE },
       });
@@ -213,11 +238,11 @@ export class DirectivesService {
     // to QUEUED (not deleted) and a fresh message is published so another
     // Assignment attempt can happen. Nothing about the failed attempt is
     // overwritten — it stays in the Assignment table as history.
-    await this.prisma.directive.update({
+    await this.prisma.directive.updateMany({
       where: { id: assignment.directiveId },
       data: { status: DirectiveStatus.QUEUED, assignedAt: null },
     });
-    await this.prisma.operative.update({
+    await this.prisma.operative.updateMany({
       where: { id: assignment.operativeId },
       data: { status: OperativeStatus.AVAILABLE },
     });
