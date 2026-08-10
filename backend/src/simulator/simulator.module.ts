@@ -6,6 +6,10 @@ import { OperativeSimulatorService } from './operative-simulator.service';
 
 @Module({
   imports: [DirectivesModule],
-  providers: [DirectiveGeneratorService, DispatchConsumerService, OperativeSimulatorService],
+  // OperativeSimulatorService first — its recovery pass (orphaned
+  // assignments from a previous restart) should run before the dispatch
+  // consumer starts matching new work and before the generator creates
+  // anything new.
+  providers: [OperativeSimulatorService, DispatchConsumerService, DirectiveGeneratorService],
 })
 export class SimulatorModule {}

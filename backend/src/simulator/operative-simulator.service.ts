@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { OnEvent } from '@nestjs/event-emitter';
 import { AssignmentOutcome } from '@prisma/client';
@@ -19,7 +19,7 @@ interface DirectiveAssignedPayload {
  * directive back through DirectivesService.finish() to requeue it.
  */
 @Injectable()
-export class OperativeSimulatorService {
+export class OperativeSimulatorService implements OnModuleInit {
   private readonly logger = new Logger(OperativeSimulatorService.name);
 
   constructor(
@@ -27,6 +27,31 @@ export class OperativeSimulatorService {
     private readonly directives: DirectivesService,
     private readonly config: ConfigService,
   ) {}
+
+  async onModuleInit() {
+    await this.recoverOrphanedAssignments();
+  }
+
+  // Every accept/resolve step is scheduled with an in-process setTimeout —
+  // there's no persistence for "this assignment has a pending timer."
+  // A restart (deploy, crash, redeploy) wipes those timers instantly. Any
+  // assignment that was mid-flight at that exact moment is then stuck
+  // forever: the Directive never leaves ASSIGNED/IN_PROGRESS, and its
+  // Operative never leaves BUSY, because nothing is left to resolve them.
+  // Enough restarts in a row and the whole roster silently drains to zero
+  // AVAILABLE — which is exactly what happened here. On every boot, treat
+  // any assignment still open from a previous process as lost contact and
+  // resolve it through the same abort path a real failure takes: frees the
+  // operative, requeues the directive, no new code path needed.
+  private async recoverOrphanedAssignments() {
+    const orphaned = await this.prisma.assignment.findMany({ where: { finishedAt: null } });
+    if (orphaned.length === 0) return;
+
+    this.logger.warn(`Recovering ${orphaned.length} assignment(s) orphaned by a previous restart`);
+    for (const assignment of orphaned) {
+      await this.directives.finish(assignment.id, AssignmentOutcome.ABORTED);
+    }
+  }
 
   @OnEvent('directive.assigned')
   async onAssigned(payload: DirectiveAssignedPayload) {
