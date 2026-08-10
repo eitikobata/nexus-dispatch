@@ -67,23 +67,34 @@ export class DirectivesService {
   // transaction so two consumers racing on the same operative can't both
   // succeed — the second one's update touches zero rows and the whole
   // transaction is treated as "no match" by the caller.
-  async tryAssign(directiveId: string, skill: SkillName): Promise<boolean> {
+  // Distinguishes *why* a match attempt failed, because the two failure
+  // reasons need opposite treatment by the caller:
+  //   'no_operative' — worth retrying, nobody free right now, might be soon
+  //   'stale'         — this message is a leftover for a Directive that
+  //                      already moved past QUEUED via a different message
+  //                      (e.g. an SLA-escalation republish racing an older
+  //                      retry-queue cycle for the same directive) — retrying
+  //                      this one forever would leak a ghost message that
+  //                      cycles every 5s indefinitely, for the life of the
+  //                      process, for every Directive that ever got
+  //                      SLA-escalated. Must be dropped, not re-parked.
+  async tryAssign(directiveId: string, skill: SkillName): Promise<'matched' | 'no_operative' | 'stale'> {
     const result = await this.prisma.$transaction(async (tx) => {
       const directive = await tx.directive.findUnique({ where: { id: directiveId } });
       if (!directive || directive.status !== DirectiveStatus.QUEUED) {
-        return null; // already handled (e.g. reassigned manually) — drop
+        return { reason: 'stale' as const };
       }
 
       const operative = await tx.operative.findFirst({
         where: { status: OperativeStatus.AVAILABLE, skills: { some: { name: skill } } },
       });
-      if (!operative) return null;
+      if (!operative) return { reason: 'no_operative' as const };
 
       const updated = await tx.operative.updateMany({
         where: { id: operative.id, status: OperativeStatus.AVAILABLE },
         data: { status: OperativeStatus.ASSIGNED },
       });
-      if (updated.count === 0) return null; // lost the race to another consumer
+      if (updated.count === 0) return { reason: 'no_operative' as const }; // lost the race to another consumer
 
       const assignment = await tx.assignment.create({
         data: { directiveId: directive.id, operativeId: operative.id },
@@ -97,7 +108,7 @@ export class DirectivesService {
       return { directive, operative, assignment, now };
     });
 
-    if (!result) return false;
+    if ('reason' in result) return result.reason;
 
     const waitSeconds = (result.now.getTime() - result.directive.queuedAt.getTime()) / 1000;
     this.events.emit('directive.assigned', {
@@ -106,7 +117,7 @@ export class DirectivesService {
       assignmentId: result.assignment.id,
       waitSeconds,
     });
-    return true;
+    return 'matched';
   }
 
   // Handler override: skip matching entirely, assign to a named operative.
