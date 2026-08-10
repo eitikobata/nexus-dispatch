@@ -32,17 +32,12 @@ export class OperativeSimulatorService implements OnModuleInit {
     await this.recoverOrphanedAssignments();
   }
 
-  // Every accept/resolve step is scheduled with an in-process setTimeout —
-  // there's no persistence for "this assignment has a pending timer."
-  // A restart (deploy, crash, redeploy) wipes those timers instantly. Any
-  // assignment that was mid-flight at that exact moment is then stuck
-  // forever: the Directive never leaves ASSIGNED/IN_PROGRESS, and its
-  // Operative never leaves BUSY, because nothing is left to resolve them.
-  // Enough restarts in a row and the whole roster silently drains to zero
-  // AVAILABLE — which is exactly what happened here. On every boot, treat
-  // any assignment still open from a previous process as lost contact and
-  // resolve it through the same abort path a real failure takes: frees the
-  // operative, requeues the directive, no new code path needed.
+  // Belt-and-suspenders companion to the fix in accept()/resolve() below:
+  // this covers the restart case specifically (in-process timers don't
+  // survive a process exit), while accept()/resolve()'s own try/catch
+  // covers the more common case actually seen in production — a transient
+  // failure mid-flight, no restart involved at all. Same recovery action
+  // either way: treat it as lost contact, free the operative, requeue.
   private async recoverOrphanedAssignments() {
     const orphaned = await this.prisma.assignment.findMany({ where: { finishedAt: null } });
     if (orphaned.length === 0) return;
@@ -56,24 +51,58 @@ export class OperativeSimulatorService implements OnModuleInit {
   @OnEvent('directive.assigned')
   async onAssigned(payload: DirectiveAssignedPayload) {
     const acceptDelayMs = (2 + Math.random() * 8) * 1000; // 2–10s
-    setTimeout(() => this.accept(payload).catch((e) => this.logger.error(e)), acceptDelayMs);
+    setTimeout(() => this.accept(payload), acceptDelayMs);
   }
 
+  // Not atomic by nature — confirmAcceptance() flips the operative to BUSY
+  // in the DB, then (separately) a directive lookup happens, then (separately
+  // again) a timer gets scheduled to eventually resolve it. If anything
+  // after confirmAcceptance() throws, the operative is already BUSY in the
+  // DB but no timer was ever scheduled to free it — it would otherwise be
+  // stuck forever with nothing but an error log to show for it. That's what
+  // actually happened in production: operatives got orphaned mid-flight,
+  // not from a restart losing timers, but from a transient failure in this
+  // exact gap. Recovered the same way a real lost-contact case is handled.
   private async accept(payload: DirectiveAssignedPayload) {
-    const assignment = await this.directives.confirmAcceptance(payload.assignmentId);
-    if (!assignment) return; // wiped by a reset in the meantime — nothing to continue
+    let confirmed = false;
+    try {
+      const assignment = await this.directives.confirmAcceptance(payload.assignmentId);
+      if (!assignment) return; // wiped by a reset in the meantime — nothing to continue
+      confirmed = true;
 
-    const directive = await this.prisma.directive.findUnique({ where: { id: payload.directiveId } });
-    if (!directive) return; // same race, different table
+      const directive = await this.prisma.directive.findUnique({ where: { id: payload.directiveId } });
+      if (!directive) {
+        // Operative is already BUSY at this point — don't leave it stuck
+        // just because the directive vanished right after.
+        await this.directives.finish(payload.assignmentId, AssignmentOutcome.ABORTED);
+        return;
+      }
 
-    const runMs = directive.estimatedDurationSec * 1000;
-    setTimeout(() => this.resolve(payload).catch((e) => this.logger.error(e)), runMs);
+      const runMs = directive.estimatedDurationSec * 1000;
+      setTimeout(() => this.resolve(payload), runMs);
+    } catch (err) {
+      this.logger.error(`accept() failed for assignment ${payload.assignmentId}`, err as Error);
+      if (confirmed) {
+        await this.recoverStuckAssignment(payload.assignmentId);
+      }
+    }
   }
 
   private async resolve(payload: DirectiveAssignedPayload) {
-    const abortChancePct = Number(this.config.get('OPERATIVE_ABORT_CHANCE_PCT') ?? 8);
-    const aborted = Math.random() * 100 < abortChancePct;
-    const outcome = aborted ? AssignmentOutcome.FAILED : AssignmentOutcome.SUCCESS;
-    await this.directives.finish(payload.assignmentId, outcome);
+    try {
+      const abortChancePct = Number(this.config.get('OPERATIVE_ABORT_CHANCE_PCT') ?? 8);
+      const aborted = Math.random() * 100 < abortChancePct;
+      const outcome = aborted ? AssignmentOutcome.FAILED : AssignmentOutcome.SUCCESS;
+      await this.directives.finish(payload.assignmentId, outcome);
+    } catch (err) {
+      this.logger.error(`resolve() failed for assignment ${payload.assignmentId}`, err as Error);
+      await this.recoverStuckAssignment(payload.assignmentId);
+    }
+  }
+
+  private async recoverStuckAssignment(assignmentId: string) {
+    await this.directives.finish(assignmentId, AssignmentOutcome.ABORTED).catch((e) => {
+      this.logger.error(`Recovery finish() also failed for assignment ${assignmentId} — will only clear on next self-heal reset`, e);
+    });
   }
 }
