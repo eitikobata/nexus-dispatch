@@ -82,19 +82,19 @@ export class DirectivesService {
     const result = await this.prisma.$transaction(async (tx) => {
       const directive = await tx.directive.findUnique({ where: { id: directiveId } });
       if (!directive || directive.status !== DirectiveStatus.QUEUED) {
-        return { reason: 'stale' as const };
+        return { outcome: 'stale' as const };
       }
 
       const operative = await tx.operative.findFirst({
         where: { status: OperativeStatus.AVAILABLE, skills: { some: { name: skill } } },
       });
-      if (!operative) return { reason: 'no_operative' as const };
+      if (!operative) return { outcome: 'no_operative' as const };
 
       const updated = await tx.operative.updateMany({
         where: { id: operative.id, status: OperativeStatus.AVAILABLE },
         data: { status: OperativeStatus.ASSIGNED },
       });
-      if (updated.count === 0) return { reason: 'no_operative' as const }; // lost the race to another consumer
+      if (updated.count === 0) return { outcome: 'no_operative' as const }; // lost the race to another consumer
 
       const assignment = await tx.assignment.create({
         data: { directiveId: directive.id, operativeId: operative.id },
@@ -105,10 +105,10 @@ export class DirectivesService {
         data: { status: DirectiveStatus.ASSIGNED, assignedAt: now },
       });
 
-      return { directive, operative, assignment, now };
+      return { outcome: 'matched' as const, directive, operative, assignment, now };
     });
 
-    if ('reason' in result) return result.reason;
+    if (result.outcome !== 'matched') return result.outcome;
 
     const waitSeconds = (result.now.getTime() - result.directive.queuedAt.getTime()) / 1000;
     this.events.emit('directive.assigned', {
