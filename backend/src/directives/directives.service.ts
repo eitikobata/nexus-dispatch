@@ -106,6 +106,16 @@ export class DirectivesService {
       });
 
       return { outcome: 'matched' as const, directive, operative, assignment, now };
+    }, {
+      // Prisma's default maxWait (2s) is short for a shared, multi-tenant
+      // Postgres instance — a brief external contention spike (backup,
+      // maintenance, another project's job) can exhaust it even though
+      // nothing is actually wrong with Nexus itself. Widened here so a
+      // short external blip doesn't need the retry-with-backoff path at
+      // all; the retry path still exists as the real safety net if the
+      // contention outlasts this window.
+      maxWait: 8000,
+      timeout: 10000,
     });
 
     if (result.outcome !== 'matched') return result.outcome;
@@ -164,6 +174,9 @@ export class DirectivesService {
         data: { status: DirectiveStatus.ASSIGNED, assignedAt: now },
       });
       return { assignment, now };
+    }, {
+      maxWait: 8000,
+      timeout: 10000,
     });
 
     if ('failReason' in result) {
